@@ -6,6 +6,7 @@ umask 077
 
 ACTION="${1:-}"
 THRESHOLD_SECONDS=60
+EXTERNAL_HOOK_TIMEOUT_SECONDS=3
 PAYLOAD="$(/bin/cat 2>/dev/null || true)"
 
 extract_json_field() {
@@ -27,14 +28,60 @@ record_test_event() {
   printf '%s\n' "$1" >>"$CODEX_SOUND_ALERTS_TEST_LOG" 2>/dev/null || true
 }
 
+run_external_hook() {
+  event_name="$1"
+  title="$2"
+  message="$3"
+  hook_path="${CODEX_SOUND_ALERTS_EXTERNAL_HOOK:-${HOME:-}/.config/codex-sound-alerts/external-hook}"
+
+  [ -n "$hook_path" ] && [ -f "$hook_path" ] && [ -x "$hook_path" ] || return 0
+
+  occurred_at="$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+  event_json="{\"version\":1,\"event\":\"$event_name\",\"title\":\"$title\",\"message\":\"$message\",\"occurred_at\":\"$occurred_at\"}"
+
+  if [ "${CODEX_SOUND_ALERTS_TEST_MODE:-}" = "1" ]; then
+    record_test_event "external:$event_name"
+  fi
+
+  (
+    printf '%s\n' "$event_json" | "$hook_path" "$event_name"
+  ) >/dev/null 2>&1 &
+  hook_pid=$!
+
+  (
+    /bin/sleep "$EXTERNAL_HOOK_TIMEOUT_SECONDS"
+    /bin/kill "$hook_pid" 2>/dev/null || true
+  ) >/dev/null 2>&1 &
+  watchdog_pid=$!
+
+  wait "$hook_pid" 2>/dev/null || true
+  /bin/kill "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+}
+
 emit_alert() {
   alert_kind="$1"
+
+  case "$alert_kind" in
+    approval)
+      event_name="approval_required"
+      title="Codex needs attention"
+      message="Approval required."
+      ;;
+    complete)
+      event_name="task_completed"
+      title="Codex task finished"
+      message="A long-running task has ended."
+      ;;
+    *) return 0 ;;
+  esac
 
   if [ "${CODEX_SOUND_ALERTS_TEST_MODE:-}" = "1" ]; then
     record_test_event "sound:$alert_kind"
     if [ "${CODEX_SOUND_ALERTS_TEST_NOTIFICATION_FAILURE:-}" != "1" ]; then
       record_test_event "notification:$alert_kind"
     fi
+    run_external_hook "$event_name" "$title" "$message"
     return 0
   fi
 
@@ -48,6 +95,8 @@ emit_alert() {
       /usr/bin/afplay -v 2.0 /System/Library/Sounds/Glass.aiff >/dev/null 2>&1 || true
       ;;
   esac
+
+  run_external_hook "$event_name" "$title" "$message"
 }
 
 case "$ACTION" in
