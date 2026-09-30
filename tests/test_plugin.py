@@ -27,6 +27,7 @@ def payload(session_id: str = "session-a", turn_id: str = "turn-a") -> str:
             "session_id": session_id,
             "turn_id": turn_id,
             "hook_event_name": "Test",
+            "cwd": "/workspace/example project",
             "tool_name": "Bash",
             "tool_input": {"command": "must-not-be-logged"},
         }
@@ -41,7 +42,7 @@ class ManifestTests(unittest.TestCase):
         )
 
         self.assertEqual(manifest["name"], "codex-sound-alerts")
-        self.assertEqual(manifest["version"], "0.2.0")
+        self.assertEqual(manifest["version"], "0.2.1")
         self.assertEqual(manifest["license"], "MIT")
         self.assertNotIn("skills", manifest)
         self.assertNotIn("hooks", manifest)
@@ -96,6 +97,7 @@ class NativeRuntimeMixin:
         self.state_dir = temp_path / "plugin data"
         self.log_path = temp_path / "events.log"
         self.external_log_path = temp_path / "external.jsonl"
+        self.settings_path = temp_path / "settings.json"
         if platform.system() == "Windows":
             self.external_hook_path = temp_path / "external-hook.ps1"
             self.external_hook_path.write_text(
@@ -116,6 +118,7 @@ class NativeRuntimeMixin:
                 "CODEX_SOUND_ALERTS_TEST_LOG": str(self.log_path),
                 "CODEX_SOUND_ALERTS_EXTERNAL_HOOK": str(self.external_hook_path),
                 "CODEX_SOUND_ALERTS_EXTERNAL_LOG": str(self.external_log_path),
+                "CODEX_SOUND_ALERTS_SETTINGS": str(self.settings_path),
             }
         )
 
@@ -149,7 +152,13 @@ class NativeRuntimeMixin:
     def external_events(self) -> list[dict[str, object]]:
         if not self.external_log_path.exists():
             return []
-        return [json.loads(line) for line in self.external_log_path.read_text().splitlines()]
+        return [
+            json.loads(line)
+            for line in self.external_log_path.read_text(encoding="utf-8-sig").splitlines()
+        ]
+
+    def write_settings(self, **settings: object) -> None:
+        self.settings_path.write_text(json.dumps(settings))
 
     def test_approval_alert_does_not_echo_hook_data(self) -> None:
         result = self.run_action("approval")
@@ -166,6 +175,29 @@ class NativeRuntimeMixin:
         self.assertNotIn("session_id", event)
         self.assertNotIn("turn_id", event)
         self.assertNotIn("must-not-be-logged", self.log_path.read_text())
+
+    def test_local_and_external_delivery_can_be_configured_independently(self) -> None:
+        self.write_settings(local_delivery="both", external_delivery="completion")
+        result = self.run_action("approval")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.events(), ["sound:approval", "notification:approval"])
+        self.assertEqual(self.external_events(), [])
+
+    def test_completion_only_suppresses_approval_everywhere(self) -> None:
+        self.write_settings(local_delivery="completion", external_delivery="completion")
+        result = self.run_action("approval")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.external_events(), [])
+
+    def test_opt_in_project_label_uses_only_sanitized_directory_name(self) -> None:
+        self.write_settings(include_project=True)
+        result = self.run_action("approval")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        event = self.external_events()[0]
+        self.assertEqual(event["project"], "example-project")
+        self.assertEqual(event["title"], "Codex needs attention · example-project")
+        self.assertNotIn("/workspace", json.dumps(event))
 
     def test_notification_failure_keeps_sound_and_success_exit(self) -> None:
         result = self.run_action(

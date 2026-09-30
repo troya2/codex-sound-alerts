@@ -8,6 +8,7 @@ ACTION="${1:-}"
 THRESHOLD_SECONDS=60
 EXTERNAL_HOOK_TIMEOUT_SECONDS=3
 PAYLOAD="$(/bin/cat 2>/dev/null || true)"
+SETTINGS_PATH="${CODEX_SOUND_ALERTS_SETTINGS:-${HOME:-}/.config/codex-sound-alerts/settings.json}"
 
 extract_json_field() {
   printf '%s' "$PAYLOAD" \
@@ -28,16 +29,50 @@ record_test_event() {
   printf '%s\n' "$1" >>"$CODEX_SOUND_ALERTS_TEST_LOG" 2>/dev/null || true
 }
 
+setting_value() {
+  [ -f "$SETTINGS_PATH" ] || return 1
+  /usr/bin/plutil -extract "$1" raw -o - "$SETTINGS_PATH" 2>/dev/null
+}
+
+delivery_enabled() {
+  channel="$1"
+  event_name="$2"
+  mode="$(setting_value "${channel}_delivery")" || mode="both"
+
+  case "$mode" in
+    both) return 0 ;;
+    completion) [ "$event_name" = "task_completed" ] ;;
+    *) return 0 ;;
+  esac
+}
+
+project_label() {
+  include_project="$(setting_value include_project)" || return 1
+  [ "$include_project" = "true" ] || return 1
+  cwd="$(extract_json_field cwd)" || return 1
+  [ -n "$cwd" ] || return 1
+  project="$(/usr/bin/basename "$cwd" 2>/dev/null \
+    | /usr/bin/sed 's/[^A-Za-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//')"
+  [ -n "$project" ] || return 1
+  printf '%s' "$project"
+}
+
 run_external_hook() {
   event_name="$1"
   title="$2"
   message="$3"
+  project="$4"
   hook_path="${CODEX_SOUND_ALERTS_EXTERNAL_HOOK:-${HOME:-}/.config/codex-sound-alerts/external-hook}"
 
+  delivery_enabled external "$event_name" || return 0
   [ -n "$hook_path" ] && [ -f "$hook_path" ] && [ -x "$hook_path" ] || return 0
 
   occurred_at="$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
-  event_json="{\"version\":1,\"event\":\"$event_name\",\"title\":\"$title\",\"message\":\"$message\",\"occurred_at\":\"$occurred_at\"}"
+  if [ -n "$project" ]; then
+    event_json="{\"version\":1,\"event\":\"$event_name\",\"title\":\"$title\",\"message\":\"$message\",\"project\":\"$project\",\"occurred_at\":\"$occurred_at\"}"
+  else
+    event_json="{\"version\":1,\"event\":\"$event_name\",\"title\":\"$title\",\"message\":\"$message\",\"occurred_at\":\"$occurred_at\"}"
+  fi
 
   if [ "${CODEX_SOUND_ALERTS_TEST_MODE:-}" = "1" ]; then
     record_test_event "external:$event_name"
@@ -76,27 +111,45 @@ emit_alert() {
     *) return 0 ;;
   esac
 
+  project="$(project_label)" || project=""
+  if [ -n "$project" ]; then
+    title="$title · $project"
+  fi
+
+  local_enabled=0
+  if delivery_enabled local "$event_name"; then
+    local_enabled=1
+  fi
+
   if [ "${CODEX_SOUND_ALERTS_TEST_MODE:-}" = "1" ]; then
-    record_test_event "sound:$alert_kind"
-    if [ "${CODEX_SOUND_ALERTS_TEST_NOTIFICATION_FAILURE:-}" != "1" ]; then
-      record_test_event "notification:$alert_kind"
+    if [ "$local_enabled" = "1" ]; then
+      record_test_event "sound:$alert_kind"
+      if [ "${CODEX_SOUND_ALERTS_TEST_NOTIFICATION_FAILURE:-}" != "1" ]; then
+        record_test_event "notification:$alert_kind"
+      fi
     fi
-    run_external_hook "$event_name" "$title" "$message"
+    run_external_hook "$event_name" "$title" "$message" "$project"
     return 0
   fi
 
-  case "$alert_kind" in
-    approval)
-      /usr/bin/osascript -e 'display notification "Approval required." with title "Codex needs attention"' >/dev/null 2>&1 || true
-      /usr/bin/afplay -v 2.0 /System/Library/Sounds/Ping.aiff >/dev/null 2>&1 || true
-      ;;
-    complete)
-      /usr/bin/osascript -e 'display notification "A long-running task has ended." with title "Codex task finished"' >/dev/null 2>&1 || true
-      /usr/bin/afplay -v 2.0 /System/Library/Sounds/Glass.aiff >/dev/null 2>&1 || true
-      ;;
-  esac
+  if [ "$local_enabled" = "1" ]; then
+    /usr/bin/osascript \
+      -e 'on run argv' \
+      -e 'display notification (item 2 of argv) with title (item 1 of argv)' \
+      -e 'end run' \
+      "$title" "$message" >/dev/null 2>&1 || true
 
-  run_external_hook "$event_name" "$title" "$message"
+    case "$alert_kind" in
+      approval)
+        /usr/bin/afplay -v 2.0 /System/Library/Sounds/Ping.aiff >/dev/null 2>&1 || true
+        ;;
+      complete)
+        /usr/bin/afplay -v 2.0 /System/Library/Sounds/Glass.aiff >/dev/null 2>&1 || true
+        ;;
+    esac
+  fi
+
+  run_external_hook "$event_name" "$title" "$message" "$project"
 }
 
 case "$ACTION" in
