@@ -50,6 +50,33 @@ On macOS, sounds play at `2.0` gain (twice `afplay`'s default). Notifications ar
 
 On Windows, the plugin uses a native WinRT Toast. If Toast notifications are unavailable or disabled, the system sound still plays. Windows system sounds do not expose a per-playback gain setting, so they follow the configured system volume. Focus, Do Not Disturb, mute, and operating-system notification settings are always respected.
 
+### Choose which alerts are delivered
+
+Local desktop alerts and external phone/watch alerts can be configured
+independently. Create `~/.config/codex-sound-alerts/settings.json` on macOS or
+`%APPDATA%\codex-sound-alerts\settings.json` on Windows:
+
+```json
+{
+  "local_delivery": "both",
+  "external_delivery": "completion",
+  "include_project": true
+}
+```
+
+`local_delivery` and `external_delivery` accept:
+
+- `both` for approval and task-completion alerts (the default)
+- `completion` for task-completion alerts only
+
+When `include_project` is `true`, the notification title includes a sanitized
+version of the working directory's final folder name, such as
+`Codex task finished · example-project`. The full path is never included. This
+setting defaults to `false` because the project label is also sent to an
+external hook when configured.
+
+Set `CODEX_SOUND_ALERTS_SETTINGS` to use a settings file at a different path.
+
 ## Phone, watch, and custom notifications
 
 The plugin can also call an optional external notification hook. This keeps the
@@ -70,11 +97,12 @@ The hook receives the event name as its first argument and a privacy-safe JSON
 object on standard input:
 
 ```json
-{"version":1,"event":"approval_required","title":"Codex needs attention","message":"Approval required.","occurred_at":"2026-09-30T21:30:00Z"}
+{"version":1,"event":"approval_required","title":"Codex needs attention · example-project","message":"Approval required.","project":"example-project","occurred_at":"2026-09-30T21:30:00Z"}
 ```
 
-Supported event names are `approval_required` and `task_completed`. Commands,
-prompts, paths, session IDs, and turn IDs are never included. The plugin stops
+Supported event names are `approval_required` and `task_completed`. The
+optional `project` field is present only when `include_project` is enabled.
+Commands, prompts, full paths, session IDs, and turn IDs are never included. The plugin stops
 the external hook after three seconds, ignores failures, and continues showing
 the local sound and desktop notification.
 
@@ -99,7 +127,7 @@ notifications are enabled for Pushover.
 ## Privacy and safety
 
 - Approval notifications use generic text and never include commands, paths, prompts, or tool names.
-- External hooks receive only the generic event name, title, message, timestamp, and schema version.
+- External hooks receive only the generic event name, title, message, timestamp, schema version, and an optional sanitized project label.
 - The approval Hook emits no `allow`, `deny`, or other decision. Codex continues to show its normal approval UI.
 - Timing state contains only a hash of the Codex session/turn IDs and a Unix timestamp.
 - Timing files live in Codex's plugin data directory, are removed when the turn ends, and stale entries older than seven days are cleaned up.
