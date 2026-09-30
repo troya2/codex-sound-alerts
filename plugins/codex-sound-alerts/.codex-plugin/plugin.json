@@ -1,6 +1,6 @@
 {
   "name": "codex-sound-alerts",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Sound and desktop notifications when Codex needs approval or finishes a long task.",
   "author": {
     "name": "mashukui",
@@ -19,7 +19,7 @@
   "interface": {
     "displayName": "Codex Sound Alerts",
     "shortDescription": "Hear when Codex needs your attention.",
-    "longDescription": "Plays distinct sound and desktop notifications when Codex requests permission or finishes a task that ran for at least 60 seconds. It never approves a request or changes Codex permissions.",
+    "longDescription": "Plays distinct sound and desktop notifications when Codex requests permission or finishes a task that ran for at least 60 seconds, with an optional privacy-safe external hook for phone and watch alerts. It never approves a request or changes Codex permissions.",
     "developerName": "mashukui",
     "category": "Productivity",
     "capabilities": [

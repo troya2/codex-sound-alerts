@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-[![Version](https://img.shields.io/badge/version-v0.1.1-2563EB)](https://github.com/mashukui/codex-sound-alerts) [![Codex](https://img.shields.io/badge/Codex-0.144.3%2B-000000?logo=openai&logoColor=white)](https://github.com/openai/codex) ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555555) [![License](https://img.shields.io/badge/license-MIT-7C3AED)](https://github.com/mashukui/codex-sound-alerts?tab=MIT-1-ov-file)
+[![Version](https://img.shields.io/badge/version-v0.2.0-2563EB)](https://github.com/mashukui/codex-sound-alerts) [![Codex](https://img.shields.io/badge/Codex-0.144.3%2B-000000?logo=openai&logoColor=white)](https://github.com/openai/codex) ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555555) [![License](https://img.shields.io/badge/license-MIT-7C3AED)](https://github.com/mashukui/codex-sound-alerts?tab=MIT-1-ov-file)
 
 Codex Sound Alerts is a lightweight plugin that lets you step away from the screen during long Codex tasks. It plays distinct sounds and shows desktop notifications when:
 
@@ -50,9 +50,56 @@ On macOS, sounds play at `2.0` gain (twice `afplay`'s default). Notifications ar
 
 On Windows, the plugin uses a native WinRT Toast. If Toast notifications are unavailable or disabled, the system sound still plays. Windows system sounds do not expose a per-playback gain setting, so they follow the configured system volume. Focus, Do Not Disturb, mute, and operating-system notification settings are always respected.
 
+## Phone, watch, and custom notifications
+
+The plugin can also call an optional external notification hook. This keeps the
+core plugin dependency-free while allowing integrations with Pushover, ntfy,
+Zulip, Slack, or any other service.
+
+On macOS, create an executable at:
+
+```text
+~/.config/codex-sound-alerts/external-hook
+```
+
+You can instead set `CODEX_SOUND_ALERTS_EXTERNAL_HOOK` to an absolute executable
+path. On Windows, the default path is
+`%APPDATA%\codex-sound-alerts\external-hook.ps1`.
+
+The hook receives the event name as its first argument and a privacy-safe JSON
+object on standard input:
+
+```json
+{"version":1,"event":"approval_required","title":"Codex needs attention","message":"Approval required.","occurred_at":"2026-09-30T21:30:00Z"}
+```
+
+Supported event names are `approval_required` and `task_completed`. Commands,
+prompts, paths, session IDs, and turn IDs are never included. The plugin stops
+the external hook after three seconds, ignores failures, and continues showing
+the local sound and desktop notification.
+
+### Pushover on iPhone and Apple Watch
+
+A macOS Pushover example is included at `examples/pushover-hook.sh`. Copy it to
+the default hook path, make it executable, then create:
+
+```text
+~/.config/codex-sound-alerts/pushover.json
+```
+
+with permissions `600` and this content:
+
+```json
+{"user":"YOUR_USER_KEY","token":"YOUR_APPLICATION_TOKEN"}
+```
+
+Pushover notifications can mirror from the iPhone to Apple Watch when Watch
+notifications are enabled for Pushover.
+
 ## Privacy and safety
 
 - Approval notifications use generic text and never include commands, paths, prompts, or tool names.
+- External hooks receive only the generic event name, title, message, timestamp, and schema version.
 - The approval Hook emits no `allow`, `deny`, or other decision. Codex continues to show its normal approval UI.
 - Timing state contains only a hash of the Codex session/turn IDs and a Unix timestamp.
 - Timing files live in Codex's plugin data directory, are removed when the turn ends, and stale entries older than seven days are cleaned up.

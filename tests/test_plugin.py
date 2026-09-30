@@ -41,7 +41,7 @@ class ManifestTests(unittest.TestCase):
         )
 
         self.assertEqual(manifest["name"], "codex-sound-alerts")
-        self.assertEqual(manifest["version"], "0.1.1")
+        self.assertEqual(manifest["version"], "0.2.0")
         self.assertEqual(manifest["license"], "MIT")
         self.assertNotIn("skills", manifest)
         self.assertNotIn("hooks", manifest)
@@ -95,12 +95,27 @@ class NativeRuntimeMixin:
         temp_path = Path(self.temp.name)
         self.state_dir = temp_path / "plugin data"
         self.log_path = temp_path / "events.log"
+        self.external_log_path = temp_path / "external.jsonl"
+        if platform.system() == "Windows":
+            self.external_hook_path = temp_path / "external-hook.ps1"
+            self.external_hook_path.write_text(
+                'param([string]$Kind)\n$input | Out-File -Append -Encoding utf8 '
+                "$env:CODEX_SOUND_ALERTS_EXTERNAL_LOG\n"
+            )
+        else:
+            self.external_hook_path = temp_path / "external-hook"
+            self.external_hook_path.write_text(
+                "#!/bin/sh\n/bin/cat >>\"$CODEX_SOUND_ALERTS_EXTERNAL_LOG\"\n"
+            )
+            self.external_hook_path.chmod(0o700)
         self.env = os.environ.copy()
         self.env.update(
             {
                 "PLUGIN_DATA": str(self.state_dir),
                 "CODEX_SOUND_ALERTS_TEST_MODE": "1",
                 "CODEX_SOUND_ALERTS_TEST_LOG": str(self.log_path),
+                "CODEX_SOUND_ALERTS_EXTERNAL_HOOK": str(self.external_hook_path),
+                "CODEX_SOUND_ALERTS_EXTERNAL_LOG": str(self.external_log_path),
             }
         )
 
@@ -131,11 +146,25 @@ class NativeRuntimeMixin:
     def state_files(self) -> list[Path]:
         return list(self.state_dir.glob("state/*.started"))
 
+    def external_events(self) -> list[dict[str, object]]:
+        if not self.external_log_path.exists():
+            return []
+        return [json.loads(line) for line in self.external_log_path.read_text().splitlines()]
+
     def test_approval_alert_does_not_echo_hook_data(self) -> None:
         result = self.run_action("approval")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assertEqual(self.events(), ["sound:approval", "notification:approval"])
+        self.assertEqual(
+            self.events(),
+            ["sound:approval", "notification:approval", "external:approval_required"],
+        )
+        event = self.external_events()[0]
+        self.assertEqual(event["version"], 1)
+        self.assertEqual(event["event"], "approval_required")
+        self.assertEqual(event["title"], "Codex needs attention")
+        self.assertNotIn("session_id", event)
+        self.assertNotIn("turn_id", event)
         self.assertNotIn("must-not-be-logged", self.log_path.read_text())
 
     def test_notification_failure_keeps_sound_and_success_exit(self) -> None:
@@ -143,7 +172,16 @@ class NativeRuntimeMixin:
             "approval", extra_env={"CODEX_SOUND_ALERTS_TEST_NOTIFICATION_FAILURE": "1"}
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.events(), ["sound:approval"])
+        self.assertEqual(self.events(), ["sound:approval", "external:approval_required"])
+
+    def test_missing_external_hook_is_ignored(self) -> None:
+        missing_hook = str(Path(self.temp.name) / "missing-hook")
+        result = self.run_action(
+            "approval", extra_env={"CODEX_SOUND_ALERTS_EXTERNAL_HOOK": missing_hook}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.events(), ["sound:approval", "notification:approval"])
+        self.assertEqual(self.external_events(), [])
 
     def test_short_task_does_not_alert_and_state_is_removed(self) -> None:
         self.assertEqual(self.run_action("start").returncode, 0)
@@ -157,9 +195,15 @@ class NativeRuntimeMixin:
         state_file = self.state_files()[0]
         state_file.write_text(str(int(time.time()) - 61))
         self.assertEqual(self.run_action("stop").returncode, 0)
-        self.assertEqual(self.events(), ["sound:complete", "notification:complete"])
+        self.assertEqual(
+            self.events(),
+            ["sound:complete", "notification:complete", "external:task_completed"],
+        )
         self.assertEqual(self.run_action("stop").returncode, 0)
-        self.assertEqual(self.events(), ["sound:complete", "notification:complete"])
+        self.assertEqual(
+            self.events(),
+            ["sound:complete", "notification:complete", "external:task_completed"],
+        )
 
     def test_repeated_start_keeps_the_original_timestamp(self) -> None:
         self.assertEqual(self.run_action("start").returncode, 0)
@@ -169,7 +213,10 @@ class NativeRuntimeMixin:
         self.assertEqual(self.run_action("start").returncode, 0)
         self.assertEqual(state_file.read_text(), original)
         self.assertEqual(self.run_action("stop").returncode, 0)
-        self.assertEqual(self.events(), ["sound:complete", "notification:complete"])
+        self.assertEqual(
+            self.events(),
+            ["sound:complete", "notification:complete", "external:task_completed"],
+        )
 
     def test_concurrent_turns_are_isolated(self) -> None:
         first = payload("session-a", "turn-a")
@@ -181,9 +228,15 @@ class NativeRuntimeMixin:
         first_file.write_text(str(int(time.time()) - 61))
 
         self.assertEqual(self.run_action("stop", first).returncode, 0)
-        self.assertEqual(self.events(), ["sound:complete", "notification:complete"])
+        self.assertEqual(
+            self.events(),
+            ["sound:complete", "notification:complete", "external:task_completed"],
+        )
         self.assertEqual(self.run_action("stop", second).returncode, 0)
-        self.assertEqual(self.events(), ["sound:complete", "notification:complete"])
+        self.assertEqual(
+            self.events(),
+            ["sound:complete", "notification:complete", "external:task_completed"],
+        )
         self.assertEqual(self.state_files(), [])
 
     def test_malformed_payload_never_blocks_codex(self) -> None:

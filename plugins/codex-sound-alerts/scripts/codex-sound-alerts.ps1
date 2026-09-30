@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ThresholdSeconds = 60
+$ExternalHookTimeoutSeconds = 3
 
 try {
     $PayloadText = [Console]::In.ReadToEnd()
@@ -46,14 +47,69 @@ function Send-ToastNotification {
     }
 }
 
+function Invoke-ExternalHook {
+    param(
+        [string]$EventName,
+        [string]$Title,
+        [string]$Message
+    )
+
+    $HookPath = $env:CODEX_SOUND_ALERTS_EXTERNAL_HOOK
+    if (-not $HookPath -and $env:APPDATA) {
+        $HookPath = Join-Path $env:APPDATA "codex-sound-alerts\external-hook.ps1"
+    }
+    if (-not $HookPath -or -not (Test-Path -LiteralPath $HookPath -PathType Leaf)) {
+        return
+    }
+
+    $EventJson = @{
+        version = 1
+        event = $EventName
+        title = $Title
+        message = $Message
+        occurred_at = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+    } | ConvertTo-Json -Compress
+
+    if ($env:CODEX_SOUND_ALERTS_TEST_MODE -eq "1") {
+        Write-TestEvent "external:$EventName"
+    }
+
+    $Job = $null
+    try {
+        $Job = Start-Job -ScriptBlock {
+            param($Path, $Event, $Kind)
+            $Event | & $Path $Kind *> $null
+        } -ArgumentList $HookPath, $EventJson, $EventName
+        if (-not (Wait-Job -Job $Job -Timeout $ExternalHookTimeoutSeconds)) {
+            Stop-Job -Job $Job -ErrorAction SilentlyContinue
+        }
+    } catch {
+    } finally {
+        if ($Job) {
+            Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Send-Alert {
     param([ValidateSet("approval", "complete")][string]$Kind)
+
+    if ($Kind -eq "approval") {
+        $EventName = "approval_required"
+        $Title = "Codex needs attention"
+        $Message = "Approval required."
+    } else {
+        $EventName = "task_completed"
+        $Title = "Codex task finished"
+        $Message = "A long-running task has ended."
+    }
 
     if ($env:CODEX_SOUND_ALERTS_TEST_MODE -eq "1") {
         Write-TestEvent "sound:$Kind"
         if ($env:CODEX_SOUND_ALERTS_TEST_NOTIFICATION_FAILURE -ne "1") {
             Write-TestEvent "notification:$Kind"
         }
+        Invoke-ExternalHook -EventName $EventName -Title $Title -Message $Message
         return
     }
 
@@ -71,6 +127,8 @@ function Send-Alert {
     } else {
         Send-ToastNotification -Title "Codex task finished" -Body "A long-running task has ended."
     }
+
+    Invoke-ExternalHook -EventName $EventName -Title $Title -Message $Message
 }
 
 function Get-StatePath {
